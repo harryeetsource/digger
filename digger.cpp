@@ -6,7 +6,7 @@
 using namespace std;
 
 // Define the list of suspicious API functions
-char* suspicious_api_functions[] = { "HideThreadFromDebugger", "DllRegisterServer", "SuspendThread", "ShellExecute", "DebugBreak", "IsDebuggerPresent" };
+char* suspicious_api_functions[] = { "HideThreadFromDebugger", "DllRegisterServer", "SuspendThread", "ShellExecute", "ShellExecuteW", "ShellExecuteEx", "ZwLoadDriver", "MapViewOfFile", "GetAsyncKeyState", "SetWindowsHookEx", "GetForegroundWindow", "WSASocket", "bind", "URLDownloadToFile", "InternetOpen", "InternetConnect", "WriteProcessMemory", "GetTickCount", "GetEIP", "free", "WinExec", "UnhookWindowsHookEx", "WinHttpOpen" };
 const int num_suspicious_api_functions = sizeof(suspicious_api_functions) / sizeof(char*);
 
 // Check if a memory region contains a suspicious indicator
@@ -64,8 +64,4 @@ void scan_api_calls() {
     HMODULE module = GetModuleHandle(NULL);
     PIMAGE_DOS_HEADER dos_header = (PIMAGE_DOS_HEADER)module;
     PIMAGE_NT_HEADERS nt_headers = (PIMAGE_NT_HEADERS)((BYTE*)module + dos_header->e_lfanew);
-    PIMAGE_IMPORT_DESCRIPTOR import_descriptor = (PIMAGE_IMPORT_DESCRIPTOR)((BYTE*)module + nt_headers->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT].VirtualAddress);
-    while (import_descriptor->Name != NULL) {
-        const char* module_name = (const char*)((BYTE*)module + import_descriptor->Name);
-        if (_stricmp(module_name, "kernel32.dll") == 0) {
-            PIMAGE_TH
+    PIMAGE_IMPORT_DESCRIPTOR import_descriptor = (PIMAGE_IMPORT_DESCRIPTOR)((BYTE
