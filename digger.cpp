@@ -64,4 +64,31 @@ void scan_api_calls() {
     HMODULE module = GetModuleHandle(NULL);
     PIMAGE_DOS_HEADER dos_header = (PIMAGE_DOS_HEADER)module;
     PIMAGE_NT_HEADERS nt_headers = (PIMAGE_NT_HEADERS)((BYTE*)module + dos_header->e_lfanew);
-    PIMAGE_IMPORT_DESCRIPTOR import_descriptor = (PIMAGE_IMPORT_DESCRIPTOR)((BYTE
+    PIMAGE_IMPORT_DESCRIPTOR import_descriptor = (PIMAGE_IMPORT_DESCRIPTOR)((BYTE*)module + nt_headers->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT].VirtualAddress);
+    while (import_descriptor->Name != NULL) {
+        const char* module_name = (const char*)((BYTE*)module + import_descriptor->Name);
+        for (int i = 0; i < num_suspicious_api_functions; i++) {
+            if (_stricmp(module_name, suspicious_api_functions[i]) == 0) {
+                PIMAGE_THUNK_DATA thunk_data = (PIMAGE_THUNK_DATA)((BYTE*)module + import_descriptor->FirstThunk);
+                while (thunk_data->u1.Function != NULL) {
+                    FARPROC function = (FARPROC)thunk_data->u1.Function;
+                    if (function != NULL) {
+                        const char* function_name = (const char*)((BYTE*)module + ((PIMAGE_IMPORT_BY_NAME)function)->Name);
+                        if (_stricmp(function_name, suspicious_api_functions[i]) == 0) {
+                            cout << "Found suspicious API function: " << function_name << endl;
+                        }
+                    }
+                    thunk_data++;
+                }
+            }
+        }
+        import_descriptor++;
+    }
+}
+
+int main() {
+    scan_processes();
+    scan_api_calls();
+    return 0;
+}
+
