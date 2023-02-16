@@ -4,45 +4,47 @@
 #include <TlHelp32.h>
 
 using namespace std;
+struct MemoryRegion {
+    void* BaseAddress;
+    size_t RegionSize;
+    DWORD allocation_type;
+    DWORD state;
+    DWORD protect;
+    DWORD allocation_protect;
+};
 
 // Define the list of suspicious API functions
-const char* suspicious_api_functions[] = { "HideThreadFromDebugger", "DllRegisterServer", "SuspendThread", "ShellExecute", "ShellExecuteW", "ShellExecuteEx", "ZwLoadDriver", "MapViewOfFile", "GetAsyncKeyState", "SetWindowsHookEx", "GetForegroundWindow", "WSASocket", "bind", "URLDownloadToFile", "InternetOpen", "InternetConnect", "WriteProcessMemory", "GetTickCount", "GetEIP", "free", "WinExec", "UnhookWindowsHookEx", "WinHttpOpen", "LoadLibrary", "VirtualAlloc", "VirtualProtect", "CreateRemoteThread", "CreateProcess", "NtCreateThreadEx", "SetWindowsHookEx" };
+const char* suspicious_api_functions[] = { "HideThreadFromDebugger", "DllRegisterServer", "SuspendThread", "ShellExecute", "ShellExecuteW", "ShellExecuteEx", "ZwLoadDriver", "MapViewOfFile", "GetAsyncKeyState", "SetWindowsHookEx", "GetForegroundWindow", "WSASocket", "bind", "URLDownloadToFile", "InternetOpen", "InternetConnect", "WriteProcessMemory", "GetTickCount", "GetEIP", "free", "WinExec", "UnhookWindowsHookEx", "WinHttpOpen" };
 const int num_suspicious_api_functions = sizeof(suspicious_api_functions) / sizeof(char*);
 
-struct MemoryRegion {
-    void* base_address;
-    size_t region_size;
-    DWORD protection;
-};
-// Check if a memory region is suspicious
-bool is_memory_suspicious(const MemoryRegion* region) {
-    // Retrieve memory protection information
-    MEMORY_BASIC_INFORMATION info;
-    if (!VirtualQuery(region->base_address, &info, sizeof(info))) {
+// Convert a MEMORY_BASIC_INFORMATION structure to a MemoryRegion structure
+MemoryRegion to_memory_region(const MEMORY_BASIC_INFORMATION& memory_info) {
+    MemoryRegion region;
+    region.BaseAddress = memory_info.BaseAddress;
+    region.RegionSize = memory_info.RegionSize;
+    region.allocation_type = memory_info.Type;
+    region.state = memory_info.State;
+    region.protect = memory_info.Protect;
+    region.allocation_protect = memory_info.AllocationProtect;
+    return region;
+}
+
+// Define the list of suspicious memory regions
+bool is_memory_suspicious(const MemoryRegion& region) {
+    if ((region.allocation_type & MEM_COMMIT) && (region.allocation_protect & PAGE_EXECUTE_READWRITE)) {
+        // Executable memory region with RWX protection
+        return true;
+    } else if ((region.allocation_type & MEM_IMAGE) && (region.state & MEM_COMMIT) && !(region.protect & (PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY)) && (region.protect & PAGE_EXECUTE_READWRITE)) {
+        // Executable memory region that does not map to a file on disk
+        return true;
+    } else if ((region.allocation_type & MEM_COMMIT) && (region.protect & (PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY | PAGE_READWRITE | PAGE_WRITECOPY))) {
+        // RWX memory region
+        return true;
+    } else {
         return false;
     }
-
-    // Check for injected memory region
-    if ((info.State & MEM_COMMIT) && (info.Protect & PAGE_EXECUTE_READWRITE)) {
-        return true;
-    }
-
-    // Check for executable memory region that does not map to a file on disk
-    if ((info.State & MEM_COMMIT) && (info.Protect & PAGE_EXECUTE) && (info.Type & MEM_IMAGE)) {
-        char module_name[MAX_PATH];
-        GetModuleFileNameA((HMODULE)info.AllocationBase, module_name, MAX_PATH);
-        if (strlen(module_name) == 0) {
-            return true;
-        }
-    }
-
-    // Check for any RWX region
-    if ((info.State & MEM_COMMIT) && (info.Protect & PAGE_EXECUTE_READWRITE)) {
-        return true;
-    }
-
-    return false;
 }
+
 // Scan for suspicious processes
 void scan_processes() {
     HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
@@ -54,32 +56,42 @@ void scan_processes() {
             HANDLE parent_process = OpenProcess(PROCESS_QUERY_INFORMATION, FALSE, entry.th32ParentProcessID);
             if (parent_process == NULL && entry.th32ParentProcessID != 0) {
                 cout << "Found suspicious process with non-existent parent: " << entry.szExeFile << endl;
-
                 // Write the process memory to disk
-                HANDLE process = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, entry.th32ProcessID);
-                if (process != NULL) {
-                    char filename[MAX_PATH];
-                    sprintf_s(filename, MAX_PATH, "%s.dmp", entry.szExeFile);
-                    HANDLE file = CreateFileA(filename, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-                    if (file != INVALID_HANDLE_VALUE) {
-                        SIZE_T bytes_written;
-                        const size_t buffer_size = 1024;
-                        char buffer[buffer_size];
-                        DWORD_PTR address = 0;
-                        while (address < 0x7FFFFFFF && ReadProcessMemory(process, (LPCVOID)address, buffer, buffer_size, &bytes_written)) {
-                            MemoryRegion region = { (void*)address, bytes_written };
-                            if (is_memory_suspicious(&region)) {
-                                cout << "Found suspicious memory in process: " << entry.szExeFile << endl;
-                                DWORD bytes_written;
-                                WriteFile(file, buffer, bytes_written, &bytes_written, NULL);
-                            }
-                            address += bytes_written;
+                HANDLE process = OpenProcess(PROCESS_VM_READ | PROCESS_QUERY_INFORMATION, FALSE, entry.th32ProcessID);
+if (process != NULL) {
+    char filename[MAX_PATH];
+    sprintf_s(filename, MAX_PATH, "%s.dmp", entry.szExeFile);
+    HANDLE file = CreateFileA(filename, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (file != INVALID_HANDLE_VALUE) {
+        SYSTEM_INFO system_info;
+        GetSystemInfo(&system_info);
+        DWORD_PTR address = (DWORD_PTR)system_info.lpMinimumApplicationAddress;
+        while (address < (DWORD_PTR)system_info.lpMaximumApplicationAddress) {
+            MEMORY_BASIC_INFORMATION memory_info;
+            if (VirtualQueryEx(process, (LPCVOID)address, &memory_info, sizeof(memory_info)) == sizeof(memory_info)) {
+                if (memory_info.State == MEM_COMMIT) {
+                    MemoryRegion region = to_memory_region(memory_info);
+                    if (!is_memory_suspicious(region)) {
+                        char* buffer = new char[memory_info.RegionSize];
+                        SIZE_T bytes_read;
+                        if (ReadProcessMemory(process, memory_info.BaseAddress, buffer, memory_info.RegionSize, &bytes_read)) {
+                            DWORD bytes_written;
+                            WriteFile(file, buffer, bytes_read, &bytes_written, NULL);
                         }
-                        CloseHandle(file);
+                        delete[] buffer;
                     }
-                    CloseHandle(process);
                 }
+                address += memory_info.RegionSize;
             }
+            else {
+                address += system_info.dwPageSize;
+            }
+        }
+        CloseHandle(file);
+    }
+    CloseHandle(process);
+}
+}
             CloseHandle(parent_process);
         } while (Process32Next(snapshot, &entry) == TRUE);
     }
@@ -118,6 +130,3 @@ int main() {
     scan_api_calls();
     return 0;
 }
-
-
-                       
