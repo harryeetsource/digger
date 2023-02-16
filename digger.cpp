@@ -16,37 +16,33 @@ struct MemoryRegion {
 };
 // Check if a memory region is suspicious
 bool is_memory_suspicious(const MemoryRegion* region) {
-    if (region->region_size >= 1024 * 1024) {
-        // Ignore memory regions above 1MB
+    // Retrieve memory protection information
+    MEMORY_BASIC_INFORMATION info;
+    if (!VirtualQuery(region->base_address, &info, sizeof(info))) {
         return false;
     }
-    DWORD old_protection;
-    if (!VirtualProtect(region->base_address, region->region_size, PAGE_READONLY, &old_protection)) {
-        // Ignore memory regions that cannot be read
-        return false;
+
+    // Check for injected memory region
+    if ((info.State & MEM_COMMIT) && (info.Protect & PAGE_EXECUTE_READWRITE)) {
+        return true;
     }
-    char* buffer = new char[region->region_size];
-    memcpy(buffer, region->base_address, region->region_size);
-    VirtualProtect(region->base_address, region->region_size, old_protection, &old_protection);
-    if ((old_protection & PAGE_EXECUTE_READWRITE) || (old_protection & PAGE_EXECUTE_WRITECOPY) || (old_protection & PAGE_EXECUTE)) {
-        // Executable memory region
-        if (GetModuleHandleA((const char*)region->base_address) == NULL) {
-            // Not mapped to a file on disk
+
+    // Check for executable memory region that does not map to a file on disk
+    if ((info.State & MEM_COMMIT) && (info.Protect & PAGE_EXECUTE) && (info.Type & MEM_IMAGE)) {
+        char module_name[MAX_PATH];
+        GetModuleFileNameA((HMODULE)info.AllocationBase, module_name, MAX_PATH);
+        if (strlen(module_name) == 0) {
             return true;
         }
     }
-    else if (old_protection & PAGE_READWRITE) {
-        // Read-write memory region
+
+    // Check for any RWX region
+    if ((info.State & MEM_COMMIT) && (info.Protect & PAGE_EXECUTE_READWRITE)) {
         return true;
     }
-    else if (old_protection & PAGE_WRITECOPY) {
-        // Write-copy memory region
-        return true;
-    }
-    delete[] buffer;
+
     return false;
 }
-
 // Scan for suspicious processes
 void scan_processes() {
     HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
