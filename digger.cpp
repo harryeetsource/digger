@@ -6,16 +6,44 @@
 using namespace std;
 
 // Define the list of suspicious API functions
-char* suspicious_api_functions[] = { "HideThreadFromDebugger", "DllRegisterServer", "SuspendThread", "ShellExecute", "ShellExecuteW", "ShellExecuteEx", "ZwLoadDriver", "MapViewOfFile", "GetAsyncKeyState", "SetWindowsHookEx", "GetForegroundWindow", "WSASocket", "bind", "URLDownloadToFile", "InternetOpen", "InternetConnect", "WriteProcessMemory", "GetTickCount", "GetEIP", "free", "WinExec", "UnhookWindowsHookEx", "WinHttpOpen" };
+const char* suspicious_api_functions[] = { "HideThreadFromDebugger", "DllRegisterServer", "SuspendThread", "ShellExecute", "ShellExecuteW", "ShellExecuteEx", "ZwLoadDriver", "MapViewOfFile", "GetAsyncKeyState", "SetWindowsHookEx", "GetForegroundWindow", "WSASocket", "bind", "URLDownloadToFile", "InternetOpen", "InternetConnect", "WriteProcessMemory", "GetTickCount", "GetEIP", "free", "WinExec", "UnhookWindowsHookEx", "WinHttpOpen", "LoadLibrary", "VirtualAlloc", "VirtualProtect", "CreateRemoteThread", "CreateProcess", "NtCreateThreadEx", "SetWindowsHookEx" };
 const int num_suspicious_api_functions = sizeof(suspicious_api_functions) / sizeof(char*);
 
-// Check if a memory region contains a suspicious indicator
-bool is_memory_suspicious(const char* buffer, const size_t size) {
-    for (int i = 0; i < num_suspicious_indicators; i++) {
-        if (strstr(buffer, suspicious_indicators[i]) != NULL) {
+struct MemoryRegion {
+    void* base_address;
+    size_t region_size;
+    DWORD protection;
+};
+// Check if a memory region is suspicious
+bool is_memory_suspicious(const MemoryRegion* region) {
+    if (region->region_size >= 1024 * 1024) {
+        // Ignore memory regions above 1MB
+        return false;
+    }
+    DWORD old_protection;
+    if (!VirtualProtect(region->base_address, region->region_size, PAGE_READONLY, &old_protection)) {
+        // Ignore memory regions that cannot be read
+        return false;
+    }
+    char* buffer = new char[region->region_size];
+    memcpy(buffer, region->base_address, region->region_size);
+    VirtualProtect(region->base_address, region->region_size, old_protection, &old_protection);
+    if ((old_protection & PAGE_EXECUTE_READWRITE) || (old_protection & PAGE_EXECUTE_WRITECOPY) || (old_protection & PAGE_EXECUTE)) {
+        // Executable memory region
+        if (GetModuleHandleA((const char*)region->base_address) == NULL) {
+            // Not mapped to a file on disk
             return true;
         }
     }
+    else if (old_protection & PAGE_READWRITE) {
+        // Read-write memory region
+        return true;
+    }
+    else if (old_protection & PAGE_WRITECOPY) {
+        // Write-copy memory region
+        return true;
+    }
+    delete[] buffer;
     return false;
 }
 
@@ -30,8 +58,9 @@ void scan_processes() {
             HANDLE parent_process = OpenProcess(PROCESS_QUERY_INFORMATION, FALSE, entry.th32ParentProcessID);
             if (parent_process == NULL && entry.th32ParentProcessID != 0) {
                 cout << "Found suspicious process with non-existent parent: " << entry.szExeFile << endl;
+
                 // Write the process memory to disk
-                HANDLE process = OpenProcess(PROCESS_VM_READ, FALSE, entry.th32ProcessID);
+                HANDLE process = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, entry.th32ProcessID);
                 if (process != NULL) {
                     char filename[MAX_PATH];
                     sprintf_s(filename, MAX_PATH, "%s.dmp", entry.szExeFile);
@@ -42,8 +71,10 @@ void scan_processes() {
                         char buffer[buffer_size];
                         DWORD_PTR address = 0;
                         while (address < 0x7FFFFFFF && ReadProcessMemory(process, (LPCVOID)address, buffer, buffer_size, &bytes_written)) {
-                            if (is_memory_suspicious(buffer, bytes_written)) {
+                            MemoryRegion region = { (void*)address, bytes_written };
+                            if (is_memory_suspicious(&region)) {
                                 cout << "Found suspicious memory in process: " << entry.szExeFile << endl;
+                                DWORD bytes_written;
                                 WriteFile(file, buffer, bytes_written, &bytes_written, NULL);
                             }
                             address += bytes_written;
@@ -65,15 +96,15 @@ void scan_api_calls() {
     PIMAGE_DOS_HEADER dos_header = (PIMAGE_DOS_HEADER)module;
     PIMAGE_NT_HEADERS nt_headers = (PIMAGE_NT_HEADERS)((BYTE*)module + dos_header->e_lfanew);
     PIMAGE_IMPORT_DESCRIPTOR import_descriptor = (PIMAGE_IMPORT_DESCRIPTOR)((BYTE*)module + nt_headers->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT].VirtualAddress);
-    while (import_descriptor->Name != NULL) {
+    while ((uintptr_t)import_descriptor->Name != 0) {
         const char* module_name = (const char*)((BYTE*)module + import_descriptor->Name);
         for (int i = 0; i < num_suspicious_api_functions; i++) {
             if (_stricmp(module_name, suspicious_api_functions[i]) == 0) {
                 PIMAGE_THUNK_DATA thunk_data = (PIMAGE_THUNK_DATA)((BYTE*)module + import_descriptor->FirstThunk);
-                while (thunk_data->u1.Function != NULL) {
+                while ((uintptr_t)thunk_data->u1.Function != 0) {
                     FARPROC function = (FARPROC)thunk_data->u1.Function;
                     if (function != NULL) {
-                        const char* function_name = (const char*)((BYTE*)module + ((PIMAGE_IMPORT_BY_NAME)function)->Name);
+                        const char* function_name = (const char*)((BYTE*)module + *(DWORD*)((BYTE*)function + 2));
                         if (_stricmp(function_name, suspicious_api_functions[i]) == 0) {
                             cout << "Found suspicious API function: " << function_name << endl;
                         }
@@ -92,3 +123,5 @@ int main() {
     return 0;
 }
 
+
+                       
