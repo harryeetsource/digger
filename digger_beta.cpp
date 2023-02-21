@@ -279,14 +279,30 @@ MemoryRegion to_memory_region(const MEMORY_BASIC_INFORMATION & memory_info) {
 }
 
 // Helper function to check if a memory region is suspicious based on its protection and allocation types
-bool is_memory_suspicious(const MemoryRegion & region) {
+bool is_memory_suspicious(const MemoryRegion& region) {
   // Check if the memory is PAGE_EXECUTE or PAGE_EXECUTE_READ
   if (region.protect == PAGE_EXECUTE || region.protect == PAGE_EXECUTE_READ) {
     return true;
   }
+  //Process has non existent parent
+if (region.allocation_type == 0) {
+        return true;
+    }
   // Check if the memory is PAGE_READWRITE and has MEM_PRIVATE allocation type
   if (region.protect == PAGE_READWRITE && region.allocation_type == MEM_PRIVATE) {
-    return true;
+    // Read the memory region into a buffer
+    char* buffer = new char[region.RegionSize];
+    SIZE_T bytes_read;
+    if (ReadProcessMemory(GetCurrentProcess(), region.BaseAddress, buffer, region.RegionSize, &bytes_read)) {
+      // Search for the suspicious API functions in the memory region
+      for (int i = 0; i < num_suspicious_api_functions; i++) {
+        if (strstr(buffer, suspicious_api_functions[i]) != NULL) {
+          delete[] buffer;
+          return true;
+        }
+      }
+    }
+    delete[] buffer;
   }
   return false;
 }
