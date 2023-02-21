@@ -211,11 +211,60 @@ void dump_process_memory() {
 
 int main() {
   cout << "Scanning for suspicious processes..." << endl;
-  scan_processes(true); // Set to true to dump the memory if the debug registers flag is set
-  cout << "Dumping memory for current process..." << endl;
-  dump_process_memory();
+  HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+  PROCESSENTRY32 entry;
+  entry.dwSize = sizeof(PROCESSENTRY32);
+  if (Process32First(snapshot, & entry) == TRUE) {
+    do {
+      // Check if the process is the current process
+      if (entry.th32ProcessID == GetCurrentProcessId()) {
+        continue;
+      }
+
+      cout << "Scanning process: " << entry.szExeFile << endl;
+      // Write the process memory to disk
+      HANDLE process = OpenProcess(PROCESS_VM_READ | PROCESS_QUERY_INFORMATION, FALSE, entry.th32ProcessID);
+      if (process != NULL) {
+        char filename[MAX_PATH];
+        sprintf_s(filename, MAX_PATH, "%s.dmp", entry.szExeFile);
+
+        HANDLE file = CreateFileA(filename, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (file != INVALID_HANDLE_VALUE) {
+          SYSTEM_INFO system_info;
+          GetSystemInfo(&system_info);
+          DWORD_PTR address = (DWORD_PTR)system_info.lpMinimumApplicationAddress;
+          while (address < (DWORD_PTR)system_info.lpMaximumApplicationAddress) {
+            MEMORY_BASIC_INFORMATION memory_info;
+            if (VirtualQueryEx(process, (LPCVOID)address, &memory_info, sizeof(memory_info)) == sizeof(memory_info)) {
+              if (memory_info.State == MEM_COMMIT) {
+                MemoryRegion region = to_memory_region(memory_info);
+                if (!is_memory_suspicious(region)) {
+                  char* buffer = new char[memory_info.RegionSize];
+                  SIZE_T bytes_read;
+                  if (ReadProcessMemory(process, memory_info.BaseAddress, buffer, memory_info.RegionSize, &bytes_read)) {
+                    DWORD bytes_written;
+                    WriteFile(file, buffer, bytes_read, &bytes_written, NULL);
+                  }
+                  delete[] buffer;
+                }
+              }
+              address += memory_info.RegionSize;
+            }
+            else {
+              address += system_info.dwPageSize;
+            }
+          }
+          CloseHandle(file);
+        }
+        CloseHandle(process);
+      }
+    } while (Process32Next(snapshot, &entry) == TRUE);
+  }
+  CloseHandle(snapshot);
+
   return 0;
 }
+
 
 // Helper function to convert MEMORY_BASIC_INFORMATION struct to MemoryRegion struct
 MemoryRegion to_memory_region(const MEMORY_BASIC_INFORMATION & memory_info) {
