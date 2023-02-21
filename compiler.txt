@@ -1,1 +1,1 @@
-gcc.exe -std=c++17 .\digger.cpp -o .\digger.exe -lpsapi -lkernel32 -luser32 -ladvapi32 -lstdc++ -static-libgcc -static-libstdc++ -static
+gcc.exe -std=c++17 .\digger.cpp -o .\digger.exe -lpsapi -lkernel32 -luser32 -ladvapi32 -lstdc++ -static-libgcc -static-libstdc++ -static -lntdll
