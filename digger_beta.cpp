@@ -1,308 +1,369 @@
 #include <iostream>
-
 #include <Windows.h>
-
 #include <Psapi.h>
-
 #include <TlHelp32.h>
-
 #include <cstring>
-
 #include <cstdio>
-
 #include <fstream>
-
 #include <sstream>
+#include <unordered_set>
+#include <set>
+#include <wchar.h>
+#include <winternl.h>
+#include <dbghelp.h>
+
+#pragma comment(lib, "ntdll.lib")
+#pragma comment(lib, "Dbghelp.lib")
 
 using namespace std;
 
 struct MemoryRegion {
-  void * BaseAddress;
-  size_t RegionSize;
-  DWORD allocation_type;
-  DWORD state;
-  DWORD protect;
-  DWORD allocation_protect;
+    void* BaseAddress;
+    size_t RegionSize;
+    DWORD allocation_type;
+    DWORD state;
+    DWORD protect;
+    DWORD allocation_protect;
 };
 
-MemoryRegion to_memory_region(const MEMORY_BASIC_INFORMATION & memory_info);
-bool is_memory_suspicious(const MemoryRegion & region);
+// Declare function prototypes
+void dump_process(DWORD process_id, set<DWORD>& dumped_processes);
+MemoryRegion to_memory_region(const MEMORY_BASIC_INFORMATION& memory_info);
+bool is_memory_suspicious(const MemoryRegion& region, DWORD process_id);
+void scan_processes(bool dump_if_debug_registers_set);
+bool is_suspicious_api_call(const CONTEXT& context);
+
 // Define the list of suspicious API functions
-const char * suspicious_api_functions[] = {
-  "CreateRemoteThread",
-  "HideThreadFromDebugger",
-  "DllRegisterServer",
-  "SuspendThread",
-  "ShellExecute",
-  "ShellExecuteW",
-  "ShellExecuteEx",
-  "ZwLoadDriver",
-  "MapViewOfFile",
-  "GetAsyncKeyState",
-  "SetWindowsHookEx",
-  "GetForegroundWindow",
-  "WSASocket",
-  "bind",
-  "URLDownloadToFileA",
-  "InternetOpen",
-  "InternetConnect",
-  "WriteProcessMemory",
-  "GetTickCount",
-  "GetEIP",
-  "free",
-  "WinExec",
-  "UnhookWindowsHookEx",
-  "WinHttpOpen"
+const char* suspicious_api_functions[] = {
+    "CreateRemoteThread",
+    "HideThreadFromDebugger",
+    "DllRegisterServer",
+    "SuspendThread",
+    "ShellExecute",
+    "ShellExecuteW",
+    "ShellExecuteEx",
+    "ZwLoadDriver",
+    "MapViewOfFile",
+    "GetAsyncKeyState",
+    "SetWindowsHookEx",
+    "GetForegroundWindow",
+    "WSASocket",
+    "bind",
+    "URLDownloadToFileA",
+    "InternetOpen",
+    "InternetConnect",
+    "WriteProcessMemory",
+    "GetTickCount",
+    "GetEIP",
+    "free",
+    "WinExec",
+    "UnhookWindowsHookEx",
+    "WinHttpOpen"
 };
-const int num_suspicious_api_functions = sizeof(suspicious_api_functions) / sizeof(char * );
+
+const int num_suspicious_api_functions = sizeof(suspicious_api_functions) / sizeof(const char*);
+
 // Scan for suspicious processes
 void scan_processes(bool dump_if_debug_registers_set) {
-  HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-  PROCESSENTRY32 entry;
-  entry.dwSize = sizeof(PROCESSENTRY32);
-  if (Process32First(snapshot, & entry) == TRUE) {
-    do {
-      // Check if the process has a non-existent parent
-      HANDLE parent_process = OpenProcess(PROCESS_QUERY_INFORMATION, FALSE, entry.th32ParentProcessID);
-      if (parent_process == NULL && entry.th32ParentProcessID != 0) {
-        cout << "Found suspicious process with non-existent parent: " << entry.szExeFile << endl;
-        // Write the process memory to disk
-        HANDLE process = OpenProcess(PROCESS_VM_READ | PROCESS_QUERY_INFORMATION, FALSE, entry.th32ProcessID);
-        if (process != NULL) {
-          char filename[MAX_PATH];
-          sprintf_s(filename, MAX_PATH, "%s.dmp", entry.szExeFile);
+    set<DWORD> dumped_processes;
+    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    PROCESSENTRY32 entry;
+    entry.dwSize = sizeof(PROCESSENTRY32);
+    if (Process32First(snapshot, &entry) == TRUE) {
+        do {
+            // Check if the process has already been dumped
+            if (dumped_processes.count(entry.th32ProcessID) > 0) {
+                continue;
+            }
 
-          if (dump_if_debug_registers_set) {
-            CONTEXT context;
-            context.ContextFlags = CONTEXT_DEBUG_REGISTERS;
-            if (GetThreadContext(GetCurrentThread(), & context)) {
-              if (context.Dr0 || context.Dr1 || context.Dr2 || context.Dr3) {
-                HANDLE file = CreateFileA(filename, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-                if (file != INVALID_HANDLE_VALUE) {
-                  SYSTEM_INFO system_info;
-                  GetSystemInfo( & system_info);
-                  DWORD_PTR address = (DWORD_PTR) system_info.lpMinimumApplicationAddress;
-                  while (address < (DWORD_PTR) system_info.lpMaximumApplicationAddress) {
-                    MEMORY_BASIC_INFORMATION memory_info;
-                    if (VirtualQueryEx(process, (LPCVOID) address, & memory_info, sizeof(memory_info)) == sizeof(memory_info)) {
-                      if (memory_info.State == MEM_COMMIT) {
-                        MemoryRegion region = to_memory_region(memory_info);
-                        if (!is_memory_suspicious(region)) {
-                          char * buffer = new char[memory_info.RegionSize];
-                          SIZE_T bytes_read;
-                          if (ReadProcessMemory(process, memory_info.BaseAddress, buffer, memory_info.RegionSize, & bytes_read)) {
-                            DWORD bytes_written;
-                            WriteFile(file, buffer, bytes_read, & bytes_written, NULL);
-                          }
-                          delete[] buffer;
+            // Check if the process is suspended
+            HANDLE process = OpenProcess(PROCESS_QUERY_INFORMATION, FALSE, entry.th32ProcessID);
+            if (process != NULL) {
+                THREADENTRY32 thread_entry;
+                thread_entry.dwSize = sizeof(THREADENTRY32);
+                HANDLE thread_snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, entry.th32ProcessID);
+                if (Thread32First(thread_snapshot, &thread_entry) == TRUE) {
+                    bool is_suspended = true;
+                    do {
+                        if (thread_entry.th32OwnerProcessID == entry.th32ProcessID) {
+                            HANDLE thread = OpenThread(THREAD_GET_CONTEXT | THREAD_SUSPEND_RESUME, FALSE, thread_entry.th32ThreadID);
+                            if (thread != NULL) {
+                                // Suspend the thread to avoid interference with the memory dump
+                                SuspendThread(thread);
+
+                                // Get the context of the thread to check for suspicious API calls
+                                CONTEXT context;
+                                memset(&context, 0, sizeof(context));
+                                context.ContextFlags = CONTEXT_CONTROL | CONTEXT_INTEGER | CONTEXT_SEGMENTS;
+                                if (GetThreadContext(thread, &context) == TRUE) {
+                                    if (is_suspicious_api_call(context)){
+// Dump the process memory if debug registers are set
+if (dump_if_debug_registers_set) {
+dump_process(entry.th32ProcessID, dumped_processes);
+} else {
+// Get the list of memory regions for the process
+vector<MemoryRegion> memory_regions;
+MEMORY_BASIC_INFORMATION memory_info;
+memset(&memory_info, 0, sizeof(memory_info));
+void* address = NULL;
+while (VirtualQueryEx(process, address, &memory_info, sizeof(memory_info)) == sizeof(memory_info)) {
+// Convert the memory information to a MemoryRegion struct
+MemoryRegion region = to_memory_region(memory_info);
+// Check if the memory region is suspicious
+if (is_memory_suspicious(region, entry.th32ProcessID)) {
+memory_regions.push_back(region);
+}
+address = (char*)address + memory_info.RegionSize;
+}
+                                        // Dump the suspicious memory regions for the process
+                                        if (!memory_regions.empty()) {
+                                            dump_process(entry.th32ProcessID, dumped_processes, memory_regions);
+                                        }
+                                    }
+                                }
+
+                                // Resume the thread to allow it to continue running
+                                ResumeThread(thread);
+                                CloseHandle(thread);
+                            }
                         }
-                      }
-                      address += memory_info.RegionSize;
-                    } else {
-                      address += system_info.dwPageSize;
                     }
-                  }
-                  CloseHandle(file);
-                }
-              }
+                } while (Thread32Next(thread_snapshot, &thread_entry) == TRUE);
+                CloseHandle(thread_snapshot);
             }
-          } else {
-            HANDLE file = CreateFileA(filename, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-            if (file != INVALID_HANDLE_VALUE) {
-              SYSTEM_INFO system_info;
-              GetSystemInfo( & system_info);
-              DWORD_PTR address = (DWORD_PTR) system_info.lpMinimumApplicationAddress;
-              while (address < (DWORD_PTR) system_info.lpMaximumApplicationAddress) {
-                MEMORY_BASIC_INFORMATION memory_info;
-                if (VirtualQueryEx(process, (LPCVOID) address, & memory_info, sizeof(memory_info)) == sizeof(memory_info)) {
-                  if (memory_info.State == MEM_COMMIT) {
-                    MemoryRegion region = to_memory_region(memory_info);
-                    if (!is_memory_suspicious(region)) {
-                      char * buffer = new char[memory_info.RegionSize];
-                      SIZE_T bytes_read;
-                      if (ReadProcessMemory(process, memory_info.BaseAddress, buffer, memory_info.RegionSize, & bytes_read)) {
-                        DWORD bytes_written;
-                        WriteFile(file, buffer, bytes_read, & bytes_written, NULL);
-                      }
-                      delete[] buffer;
-                    }
-                  }
-                  address += memory_info.RegionSize;
-                } else {
-                  address += system_info.dwPageSize;
-                }
-              }
-              CloseHandle(file);
-            }
-          }
-          CloseHandle(process);
+            CloseHandle(process);
         }
-      }
-      CloseHandle(parent_process);
-    } while (Process32Next(snapshot, & entry) == TRUE);
-  }
-  CloseHandle(snapshot);
+    } while (Process32Next(snapshot, &entry) == TRUE);
+}
+CloseHandle(snapshot);
 }
 
-// Dump the memory of the given module to a file
-void dump_module_memory(HMODULE module) {
-  char module_name[MAX_PATH * 2];
-  if (GetModuleFileNameExA(GetCurrentProcess(), module, module_name, MAX_PATH)) {
-    cout << "Dumping memory for module: " << module_name << endl;
-    // Write the module memory to disk
-    stringstream filename_ss;
-    filename_ss << module_name << ".dmp";
-    string filename = filename_ss.str();
-    try {
-      ofstream file(filename, ios::out | ios::binary | ios::trunc);
-      if (file) {
-        MEMORY_BASIC_INFORMATION memory_info;
-        DWORD_PTR address = (DWORD_PTR) module;
-        DWORD_PTR module_size = 0;
+// Check if a particular API call is suspicious
+bool is_suspicious_api_call(const CONTEXT& context) {
+// Get the program counter (instruction pointer) from the context
+DWORD_PTR program_counter = context.Eip;
+// Get the function name at the current program counter using DbgHelp
+char function_name[256];
+function_name[0] = '\0';
+IMAGEHLP_SYMBOL* symbol = (IMAGEHLP_SYMBOL*)malloc(sizeof(IMAGEHLP_SYMBOL) + 256);
+memset(symbol, 0, sizeof(IMAGEHLP_SYMBOL) + 256);
+symbol->SizeOfStruct = sizeof(IMAGEHLP_SYMBOL);
+symbol->MaxNameLength = 255;
+DWORD displacement;
+if (SymGetSymFromAddr(GetCurrentProcess(), program_counter, &displacement, symbol) == TRUE) {
+    strcpy(function_name, symbol->Name);
+}
+free(symbol);
 
-        // Find the size of the module in memory
-        while (VirtualQueryEx(GetCurrentProcess(), (LPCVOID) address, & memory_info, sizeof(memory_info)) == sizeof(memory_info)) {
-          if (memory_info.AllocationBase == module) {
-            module_size += memory_info.RegionSize;
-          }
-          address += memory_info.RegionSize;
-          if (address >= (DWORD_PTR) module + module_size) {
-            break;
-          }
-        }
-
-        // Dump the memory of the module to disk
-        address = (DWORD_PTR) module;
-        while (VirtualQueryEx(GetCurrentProcess(), (LPCVOID) address, & memory_info, sizeof(memory_info)) == sizeof(memory_info)) {
-          if (memory_info.State == MEM_COMMIT) {
-            MemoryRegion region = to_memory_region(memory_info);
-            if (!is_memory_suspicious(region)) {
-              char * buffer = new char[memory_info.RegionSize];
-              SIZE_T bytes_read;
-              if (ReadProcessMemory(GetCurrentProcess(), memory_info.BaseAddress, buffer, memory_info.RegionSize, & bytes_read)) {
-                file.write(buffer, bytes_read);
-              }
-              delete[] buffer;
-            }
-          }
-          address += memory_info.RegionSize;
-          if (address >= (DWORD_PTR) module + module_size) {
-            break;
-          }
-        }
-      }
-    } catch (...) {
-      cout << "Error dumping memory for module: " << module_name << endl;
+// Check if the function name is in the list of suspicious API functions
+for (int i = 0; i < num_suspicious_api_functions; i++) {
+    if (strcmp(function_name, suspicious_api_functions[i]) == 0) {
+        return true;
     }
-  }
+}
+return false;
 }
 
-// Dump the memory of all modules in the current process
-void dump_process_memory() {
-  HMODULE modules[1024];
-  DWORD cb_needed;
-  if (EnumProcessModules(GetCurrentProcess(), modules, sizeof(modules), & cb_needed)) {
-    int num_modules = cb_needed / sizeof(HMODULE);
-    for (int i = 0; i < num_modules; i++) {
-      dump_module_memory(modules[i]);
+// Convert a MEMORY_BASIC_INFORMATION struct to a MemoryRegion struct
+MemoryRegion to_memory_region(const MEMORY_BASIC_INFORMATION& memory_info) {
+MemoryRegion region;
+region.BaseAddress = memory_info.BaseAddress;
+region.RegionSize = memory_info.RegionSize;
+region.allocation_type = memory_info.Type;
+region.state = memory_info.State;
+region.protect = memory_info.Protect;
+region.allocation_protect = memory_info.AllocationProtect;
+return region;
+}
+
+// Check if a memory region is suspicious
+bool is_memory_suspicious(const MemoryRegion& region, DWORD process_id) {
+    // Check if the memory region is not a PAGE_NOACCESS or PAGE_GUARD region
+    if (region.protect == PAGE_NOACCESS || region.protect == PAGE_GUARD) {
+        return false;
     }
-  }
+    // Check if the memory region is executable
+    if ((region.protect & PAGE_EXECUTE) != PAGE_EXECUTE &&
+        (region.protect & PAGE_EXECUTE_READ) != PAGE_EXECUTE_READ &&
+        (region.protect & PAGE_EXECUTE_READWRITE) != PAGE_EXECUTE_READWRITE &&
+        (region.protect & PAGE_EXECUTE_WRITECOPY) != PAGE_EXECUTE_WRITECOPY) {
+        return false;
+    }
+    // Check if the memory region is not a system DLL or executable module
+    HMODULE module = NULL;
+    if (GetModuleHandleEx(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                          (LPCTSTR)region.BaseAddress, &module) == TRUE) {
+        // Get the module information
+        MODULEINFO module_info;
+        if (GetModuleInformation(GetCurrentProcess(), module, &module_info, sizeof(module_info)) == TRUE) {
+            wchar_t module_file_name[MAX_PATH];
+            if (GetModuleFileNameExW(GetCurrentProcess(), module, module_file_name, MAX_PATH) != 0) {
+                wstring file_name = wstring(module_file_name);
+                // Check if the file name contains the Windows or System32 directory
+                if (file_name.find(L"\\Windows\\") != wstring::npos || file_name.find(L"\\System32\\") != wstring::npos) {
+                    return false;
+                }
+                // Check if the file name matches a known system DLL or executable module
+                unordered_set<wstring> system_modules = {
+                    L"ntdll.dll",
+                    L"kernel32.dll",
+                    L"kernelbase.dll",
+                    L"user32.dll",
+                    L"gdi32.dll",
+                    L"lpk.dll",
+                    L"usp10.dll",
+                    L"advapi32.dll",
+                    L"shell32.dll",
+                    L"ole32.dll",
+                    L"oleaut32.dll",
+                    L"comctl32.dll",
+                    L"comdlg32.dll",
+                    L"wininet.dll",
+                    L"wsock32.dll",
+                    L"ws2_32.dll",
+                    L"netapi32.dll",
+                    L"version.dll",
+                    L"rpcrt4.dll",
+                    L"shlwapi.dll",
+                    L"urlmon.dll",
+                    L"crypt32.dll",
+                    L"msasn1.dll",
+                    L"sspicli.dll",
+                    L"secur32.dll",
+                    L"imm32.dll",
+                    L"msctf.dll",
+                    L"cryptdll.dll",
+                    L"uxtheme.dll",
+                    L"mswsock.dll",
+                    L"wshtcpip.dll"
+                };
+                wstring file_name_lower = file_name;
+                transform(file_name_lower.begin(), file_name_lower.end(), file_name_lower.begin(), towlower);
+                if (system_modules.count(file_name_lower) > 0) {
+                    return false;
+                }
+            }
+        }
+    }
+    return true;
+}
+
+// Dump the memory of a process to a file
+void dump_process(DWORD process_id, set<DWORD>& dumped_processes, const vector<MemoryRegion>& memory_regions) {
+    // Check if the process has already been dumped
+    if (dumped_processes.count(process_id) > 0) {
+        return;
+    }
+    dumped_processes.insert
+
+// Open the process and create the output file
+HANDLE process = OpenProcess(PROCESS_VM_READ, FALSE, process_id);
+wstringstream file_name_stream;
+file_name_stream << "memory_dump_" << process_id << ".dmp";
+wstring file_name = file_name_stream.str();
+ofstream output_file(file_name, ios::binary);
+
+// Write the process ID and timestamp to the output file
+DWORD timestamp = GetTickCount();
+output_file.write((char*)&process_id, sizeof(process_id));
+output_file.write((char*)&timestamp, sizeof(timestamp));
+
+// Write the memory regions to the output file
+for (const MemoryRegion& region : memory_regions) {
+    // Allocate a buffer to hold the memory region contents
+    void* buffer = VirtualAlloc(NULL, region.RegionSize, MEM_COMMIT, PAGE_READWRITE);
+    if (buffer != NULL) {
+        // Read the memory region contents into the buffer
+        SIZE_T bytes_read;
+        if (ReadProcessMemory(process, region.BaseAddress, buffer, region.RegionSize, &bytes_read) == TRUE) {
+            // Write the memory region header to the output file
+            output_file.write((char*)&region, sizeof(region));
+
+            // Write the memory region contents to the output file
+            output_file.write((char*)buffer, region.RegionSize);
+        }
+
+        // Free the buffer
+        VirtualFree(buffer, 0, MEM_RELEASE);
+    }
+}
+
+// Close the process and output file
+CloseHandle(process);
+output_file.close();
+}
+
+// Dump the memory of a process to a file
+void dump_process(DWORD process_id, set<DWORD>& dumped_processes) {
+// Check if the process has already been dumped
+if (dumped_processes.count(process_id) > 0) {
+return;
+}
+dumped_processes.insert(process_id);
+// Open the process and create the output file
+HANDLE process = OpenProcess(PROCESS_VM_READ, FALSE, process_id);
+wstringstream file_name_stream;
+file_name_stream << "memory_dump_" << process_id << ".dmp";
+wstring file_name = file_name_stream.str();
+ofstream output_file(file_name, ios::binary);
+
+// Write the process ID and timestamp to the output file
+DWORD timestamp = GetTickCount();
+output_file.write((char*)&process_id, sizeof(process_id));
+output_file.write((char*)&timestamp, sizeof(timestamp));
+
+// Get the list of memory regions for the process
+vector<MemoryRegion> memory_regions;
+MEMORY_BASIC_INFORMATION memory_info;
+memset(&memory_info, 0, sizeof(memory_info));
+void* address = NULL;
+while (VirtualQueryEx(process, address, &memory_info, sizeof(memory_info)) == sizeof(memory_info)) {
+    // Convert the memory information to a MemoryRegion struct
+    MemoryRegion region = to_memory_region(memory_info);
+
+    // Check if the memory region is suspicious
+    if (is_memory_suspicious(region, process_id)) {
+        memory_regions.push_back(region);
+    }
+
+    address = (char*)address + memory_info.RegionSize;
+}
+
+// Write the memory regions to the output file
+for (const MemoryRegion& region : memory_regions) {
+    // Allocate a buffer to hold the memory region contents
+    void* buffer = VirtualAlloc(NULL, region.RegionSize, MEM_COMMIT, PAGE_READWRITE);
+    if (buffer != NULL) {
+        // Read the memory region contents into the buffer
+        SIZE_T bytes_read;
+        if (ReadProcessMemory(process, region.BaseAddress, buffer, region.RegionSize, &bytes_read) == TRUE) {
+            // Write the memory region header to the output file
+                   output_file.write((char*)&region, sizeof(region));
+
+        // Write the memory region contents to the output file
+        output_file.write((char*)buffer, region.RegionSize);
+    }
+
+    // Free the buffer
+    VirtualFree(buffer, 0, MEM_RELEASE);
+}
+}
+
+// Close the process and output file
+CloseHandle(process);
+output_file.close();
 }
 
 int main() {
-  cout << "Scanning for suspicious processes..." << endl;
-  HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-  PROCESSENTRY32 entry;
-  entry.dwSize = sizeof(PROCESSENTRY32);
-  if (Process32First(snapshot, & entry) == TRUE) {
-    do {
-      // Check if the process is the current process
-      if (entry.th32ProcessID == GetCurrentProcessId()) {
-        continue;
-      }
+// Initialize the symbol handler for DbgHelp
+SymSetOptions(SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS | SYMOPT_LOAD_LINES);
+SymInitialize(GetCurrentProcess(), NULL, TRUE);
+// Scan for suspicious processes and dump their memory if necessary
+scan_processes(true);
 
-      cout << "Scanning process: " << entry.szExeFile << endl;
-      // Write the process memory to disk
-      HANDLE process = OpenProcess(PROCESS_VM_READ | PROCESS_QUERY_INFORMATION, FALSE, entry.th32ProcessID);
-      if (process != NULL) {
-        char filename[MAX_PATH];
-        sprintf_s(filename, MAX_PATH, "%s.dmp", entry.szExeFile);
+// Cleanup the symbol handler
+SymCleanup(GetCurrentProcess());
 
-        HANDLE file = CreateFileA(filename, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
-        if (file != INVALID_HANDLE_VALUE) {
-          SYSTEM_INFO system_info;
-          GetSystemInfo(&system_info);
-          DWORD_PTR address = (DWORD_PTR)system_info.lpMinimumApplicationAddress;
-          while (address < (DWORD_PTR)system_info.lpMaximumApplicationAddress) {
-            MEMORY_BASIC_INFORMATION memory_info;
-            if (VirtualQueryEx(process, (LPCVOID)address, &memory_info, sizeof(memory_info)) == sizeof(memory_info)) {
-              if (memory_info.State == MEM_COMMIT) {
-                MemoryRegion region = to_memory_region(memory_info);
-                if (!is_memory_suspicious(region)) {
-                  char* buffer = new char[memory_info.RegionSize];
-                  SIZE_T bytes_read;
-                  if (ReadProcessMemory(process, memory_info.BaseAddress, buffer, memory_info.RegionSize, &bytes_read)) {
-                    DWORD bytes_written;
-                    WriteFile(file, buffer, bytes_read, &bytes_written, NULL);
-                  }
-                  delete[] buffer;
-                }
-              }
-              address += memory_info.RegionSize;
-            }
-            else {
-              address += system_info.dwPageSize;
-            }
-          }
-          CloseHandle(file);
-        }
-        CloseHandle(process);
-      }
-    } while (Process32Next(snapshot, &entry) == TRUE);
-  }
-  CloseHandle(snapshot);
-
-  return 0;
+return 0;
 }
 
-
-// Helper function to convert MEMORY_BASIC_INFORMATION struct to MemoryRegion struct
-MemoryRegion to_memory_region(const MEMORY_BASIC_INFORMATION & memory_info) {
-  MemoryRegion region;
-  region.BaseAddress = memory_info.BaseAddress;
-  region.RegionSize = memory_info.RegionSize;
-  region.allocation_type = memory_info.AllocationProtect;
-  region.state = memory_info.State;
-  region.protect = memory_info.Protect;
-  region.allocation_protect = memory_info.AllocationProtect;
-  return region;
-}
-
-// Helper function to check if a memory region is suspicious based on its protection and allocation types
-bool is_memory_suspicious(const MemoryRegion& region) {
-  // Check if the memory is PAGE_EXECUTE or PAGE_EXECUTE_READ
-  if (region.protect == PAGE_EXECUTE || region.protect == PAGE_EXECUTE_READ) {
-    return true;
-  }
-  //Process has non existent parent
-if (region.allocation_type == 0) {
-        return true;
-    }
-  // Check if the memory is PAGE_READWRITE and has MEM_PRIVATE allocation type
-  if (region.protect == PAGE_READWRITE && region.allocation_type == MEM_PRIVATE) {
-    // Read the memory region into a buffer
-    char* buffer = new char[region.RegionSize];
-    SIZE_T bytes_read;
-    if (ReadProcessMemory(GetCurrentProcess(), region.BaseAddress, buffer, region.RegionSize, &bytes_read)) {
-      // Search for the suspicious API functions in the memory region
-      for (int i = 0; i < num_suspicious_api_functions; i++) {
-        if (strstr(buffer, suspicious_api_functions[i]) != NULL) {
-          delete[] buffer;
-          return true;
-        }
-      }
-    }
-    delete[] buffer;
-  }
-  return false;
-}
