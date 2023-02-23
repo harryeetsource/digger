@@ -15,11 +15,11 @@
 #include <vector>
 #include <mutex>
 
-#ifdef _WIN64
+
 #include <winnt.h>
-#else
+
 #include <wow64cpu.h>
-#endif
+
 
 #ifdef _WIN64
 // Define x64 context struct
@@ -183,66 +183,89 @@ return module_names;
 }
 
 // Check if the given process is suspicious
+// Check if the given process is suspicious
 bool is_suspicious_process(HANDLE process_handle) {
-// Check if the process is suspended
-if (SuspendThread(process_handle) == (DWORD)-1) {
-return false;
-}
-// Check if the process has any suspicious memory regions
-set<MemoryRegion> memory_regions = get_memory_regions(process_handle);
-bool has_suspicious_memory_region = false;
-for (const MemoryRegion& memory_region : memory_regions) {
-if (is_suspicious_region(memory_region)) {
-has_suspicious_memory_region = true;
-break;
-}
-}
-// Check if the process is calling any suspicious APIs
-bool has_suspicious_API_call = false;
-HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
-if (snapshot != INVALID_HANDLE_VALUE) {
-THREADENTRY32 thread_entry;
-thread_entry.dwSize = sizeof(thread_entry);
-if (Thread32First(snapshot, &thread_entry)) {
-do {
-if (thread_entry.th32OwnerProcessID == GetProcessId(process_handle)) {
-HANDLE thread_handle = OpenThread(THREAD_ALL_ACCESS, FALSE, thread_entry.th32ThreadID);
-if (thread_handle != NULL) {
-CONTEXT context = { 0 };
-context.ContextFlags = CONTEXT_CONTROL;
-if (GetThreadContext(thread_handle, &context)) {
-STACKFRAME64 stack_frame = { 0 };
-stack_frame.AddrPC.Mode = AddrModeFlat;
-stack_frame.AddrPC.Offset = context.Eip;
-stack_frame.AddrStack.Mode = AddrModeFlat;
-stack_frame.AddrStack.Offset = context.Esp;
-stack_frame.AddrFrame.Mode = AddrModeFlat;
-stack_frame.AddrFrame.Offset = context.Ebp;
-while (StackWalk64(IMAGE_FILE_MACHINE_I386, GetCurrentProcess(), thread_handle, &stack_frame, &context, NULL, SymFunctionTableAccess64, SymGetModuleBase64, NULL)) {
-DWORD64 instruction_address = stack_frame.AddrPC.Offset;
-char symbol_buffer[sizeof(SYMBOL_INFO) + MAX_SYM_NAME];
-PSYMBOL_INFO symbol = (PSYMBOL_INFO*)symbol_buffer;
-symbol->SizeOfStruct = sizeof(SYMBOL_INFO);
-symbol->MaxNameLen = MAX_SYM_NAME;
-DWORD64 symbol_offset = 0;
-if (SymFromAddr(GetCurrentProcess(), instruction_address, &symbol_offset, symbol)) {
-if (is_suspicious_api(symbol->Name)) {
-has_suspicious_API_call = true;
-break;
-}
-}
-}
-}
-CloseHandle(thread_handle);
-}
-}
-} while (Thread32Next(snapshot, &thread_entry) && !has_suspicious_API_call);
+    // Check if the process is suspended
+    if (SuspendThread(process_handle) == (DWORD)-1) {
+        return false;
+    }
+    // Check if the process has any suspicious memory regions
+    set<MemoryRegion> memory_regions = get_memory_regions(process_handle);
+    bool has_suspicious_memory_region = false;
+    for (const MemoryRegion& memory_region : memory_regions) {
+        if (is_suspicious_region(memory_region)) {
+            has_suspicious_memory_region = true;
+            break;
+        }
+    }
+    // Check if the process is calling any suspicious APIs
+    bool has_suspicious_API_call = false;
+    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+    if (snapshot != INVALID_HANDLE_VALUE) {
+        THREADENTRY32 thread_entry;
+        thread_entry.dwSize = sizeof(thread_entry);
+        if (Thread32First(snapshot, &thread_entry)) {
+            do {
+                if (thread_entry.th32OwnerProcessID == GetProcessId(process_handle)) {
+                    HANDLE thread_handle = OpenThread(THREAD_ALL_ACCESS, FALSE, thread_entry.th32ThreadID);
+                    if (thread_handle != NULL) {
+                        CONTEXT context = { 0 };
+                        context.ContextFlags = CONTEXT_CONTROL;
+                        if (GetThreadContext(thread_handle, &context)) {
+                            STACKFRAME64 stack_frame = { 0 };
+                            stack_frame.AddrPC.Mode = AddrModeFlat;
+#ifdef _M_X64
+                            stack_frame.AddrPC.Offset = context.Rip;
+                            stack_frame.AddrStack.Offset = context.Rsp;
+                            stack_frame.AddrFrame.Offset = context.Rbp;
+#else
+                            stack_frame.AddrPC.Offset = context.Eip;
+                            stack_frame.AddrStack.Offset = context.Esp;
+                            stack_frame.AddrFrame.Offset = context.Ebp;
+#endif
+                            stack_frame.AddrStack.Mode = AddrModeFlat;
+                            stack_frame.AddrFrame.Mode = AddrModeFlat;
+                            while (StackWalk64(
+#ifdef _M_X64
+                                               IMAGE_FILE_MACHINE_AMD64,
+#else
+                                               IMAGE_FILE_MACHINE_I386,
+#endif
+                                               GetCurrentProcess(),
+                                               thread_handle,
+                                               &stack_frame,
+                                               &context,
+                                               NULL,
+                                               SymFunctionTableAccess64,
+                                               SymGetModuleBase64,
+                                               NULL)) {
+                                DWORD64 instruction_address = stack_frame.AddrPC.Offset;
+                                char symbol_buffer[sizeof(SYMBOL_INFO) + MAX_SYM_NAME];
+                                PSYMBOL_INFO symbol = (PSYMBOL_INFO*)symbol_buffer;
+                                symbol->SizeOfStruct = sizeof(SYMBOL_INFO);
+                                symbol->MaxNameLen = MAX_SYM_NAME;
+                                DWORD64 symbol_offset = 0;
+                                if (SymFromAddr(GetCurrentProcess(), instruction_address, &symbol_offset, symbol)) {
+                                    if (is_suspicious_api(symbol->Name)) {
+                                        has_suspicious_API_call = true;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        CloseHandle(thread_handle);
+                    }
+                }
+            } while (Thread32Next(snapshot,&thread_entry));
 }
 CloseHandle(snapshot);
 }
+// Resume the process
 ResumeThread(process_handle);
+// Determine if the process is suspicious
 return has_suspicious_memory_region || has_suspicious_API_call;
 }
+
 
 // Dump the memory of the given process to the specified file
 void dump_process_memory(HANDLE process_handle, const wstring& dump_file_path) {
