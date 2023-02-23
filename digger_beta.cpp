@@ -29,14 +29,17 @@
 #include <vector>
 
 #include <mutex>
-
+#include <winver.h>
+#include <versionhelpers.h>
 #include <urlmon.h>
 
 #pragma comment(lib, "urlmon.lib")
 
+#pragma comment(lib, "Version.lib")
 #include <winnt.h>
 
-#include <wow64cpu.h>
+#include <tchar.h>
+
 
 using namespace std;
 
@@ -138,7 +141,7 @@ void dump_memory(HANDLE process_handle,
   const wchar_t * file_name) {
   // Open the file for writing
   FILE * file;
-  if (_wfopen_s( & file, file_name, L "wb") != 0) {
+  if (_wfopen_s( & file, file_name, L" wb") != 0) {
     wcout << "Could not open file for writing" << endl;
     return;
   }
@@ -155,7 +158,7 @@ void dump_memory(HANDLE process_handle,
       if (memory_info.State == MEM_COMMIT && is_readable(to_memory_region(memory_info))) {
         char buffer[4096];
         SIZE_T bytes_read;
-        for (void * address2 = memory_info.BaseAddress; address2 < (void * )((DWORD_PTR) memory_info.BaseAddress + memory_info.RegionSize); address2 += sizeof(buffer)) {
+        for (char* address2 = reinterpret_cast<char*>(memory_info.BaseAddress); address2 < reinterpret_cast<char*>(memory_info.BaseAddress) + memory_info.RegionSize; address2 += sizeof(buffer)) {
           if (ReadProcessMemory(process_handle, address2, buffer, sizeof(buffer), & bytes_read) && bytes_read > 0) {
             fwrite(buffer, 1, bytes_read, file);
           }
@@ -212,42 +215,63 @@ void dump_suspicious_process(HANDLE process_handle,
 }
 
 // Download symbol files from the Microsoft symbol server
-void download_symbols() {
-    for (size_t i = 0; i < num_suspicious_api_functions; ++i) {
-      // Get the address of the function
-      FARPROC function_address = GetProcAddress(GetModuleHandle(NULL), suspicious_api_functions[i]);
-      if (function_address == NULL) {
-        wcout << "Could not get address of " << suspicious_api_functions[i] << endl;
-        continue;
-      }
+std::wstring get_file_version(const std::wstring& module_name) {
+    DWORD unused;
+    DWORD version_size = GetFileVersionInfoSize(module_name.c_str(), &unused);
+    if (version_size == 0) {
+        return L"";
+    }
 
-      // Get the name of the module containing the function
-      HMODULE module_handle;
-      if (!GetModuleHandleEx(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCTSTR) function_address, & module_handle)) {
-        wcout << "Could not get module containing " << suspicious_api_functions[i] << endl;
-        continue;
-      }
-      wstring module_name(MAX_PATH, L '\0');
-      GetModuleFileName(module_handle, & module_name[0], MAX_PATH);
-      module_name.resize(wcslen(module_name.c_str()));
+    std::vector<char> version_info(version_size);
+    if (!GetFileVersionInfo(module_name.c_str(), 0, version_size, &version_info[0])) {
+        return L"";
+    }
 
-      // Download the symbol file
-      wostringstream symbol_url;
-    symbol_url << L"http://msdl.microsoft.com/download/symbols/" << module_name << L"/" << GetFileVersion(module_name.c_str()) << L"/" << module_name.substr(module_name.find_last_of(L"\\") + 1) << L".pdb ";
+    VS_FIXEDFILEINFO* fixed_file_info;
+    UINT fixed_file_info_size;
+    if (!VerQueryValue(&version_info[0], L"\\", reinterpret_cast<void**>(&fixed_file_info), &fixed_file_info_size)) {
+        return L"";
+    }
 
-    wostringstream symbol_file_name;
-    symbol_file_name << L"C:\\symbols\\" << module_name.substr(module_name.find_last_of(L"\\") + 1) << L".pdb ";
-
-    HRESULT hr = URLDownloadToFile(NULL, symbol_url.str().c_str(), symbol_file_name.str().c_str(), 0, NULL);
-
-    if (hr == S_OK) {
-  wcout << "Downloaded symbols for " << module_name << endl;
-} else {
-  wcout << "Could not download symbols for " << module_name << endl;
+    return std::to_wstring(HIWORD(fixed_file_info->dwFileVersionMS)) + L"." + std::to_wstring(LOWORD(fixed_file_info->dwFileVersionMS)) + L"." + std::to_wstring(HIWORD(fixed_file_info->dwFileVersionLS)) + L"." + std::to_wstring(LOWORD(fixed_file_info->dwFileVersionLS));
 }
 
+void download_symbols() {
+    for (size_t i = 0; i < num_suspicious_api_functions; ++i) {
+        // Get the address of the function
+        FARPROC function_address = GetProcAddress(GetModuleHandle(NULL), suspicious_api_functions[i]);
+        if (function_address == NULL) {
+            wcout << "Could not get address of " << suspicious_api_functions[i] << endl;
+            continue;
         }
-      }
+
+        // Get the name of the module containing the function
+        HMODULE module_handle;
+        if (!GetModuleHandleEx(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, reinterpret_cast<LPCTSTR>(function_address), &module_handle)) {
+            wcout << "Could not get module containing " << suspicious_api_functions[i] << endl;
+            continue;
+        }
+        std::wstring module_name(MAX_PATH, L'\0');
+        GetModuleFileNameW(module_handle, &module_name[0], MAX_PATH);
+        module_name.resize(wcslen(module_name.c_str()));
+
+        // Download the symbol file
+        std::wostringstream symbol_url;
+        symbol_url << L"http://msdl.microsoft.com/download/symbols/" << module_name << L"/" << get_file_version(module_name) << L"/" << module_name.substr(module_name.find_last_of(L"\\") + 1) << L".pdb ";
+
+        std::wostringstream symbol_file_name;
+        symbol_file_name << L"C:\\symbols\\" << module_name.substr(module_name.find_last_of(L"\\") + 1) << L".pdb ";
+
+        HRESULT hr = URLDownloadToFileW(NULL, symbol_url.str().c_str(), symbol_file_name.str().c_str(), 0, NULL);
+
+        if (hr == S_OK) {
+            wcout << "Downloaded symbols for " << module_name << endl;
+        } else {
+            wcout << "Could not download symbols for " << module_name << endl;
+        }
+    }
+}
+
 
       // Check if an API function is suspicious
       bool is_suspicious_api(const char * api_name) {
@@ -304,7 +328,11 @@ void download_symbols() {
               DWORD line_displacement = 0;
               memset( & line_info, 0, sizeof(line_info));
               line_info.SizeOfStruct = sizeof(line_info);
-              if (SymFromAddr(process, stack_frame.AddrPC.Offset, NULL, & symbol_name[0]) && SymGetLineFromAddr64(process, stack_frame.AddrPC.Offset, & line_displacement, & line_info)) {
+              SYMBOL_INFO symbol_info;
+            symbol_info.SizeOfStruct = sizeof(SYMBOL_INFO);
+            symbol_info.MaxNameLen = MAX_SYM_NAME;
+
+              if (SymFromAddr(process, stack_frame.AddrPC.Offset, NULL, &symbol_info) && SymGetLineFromAddr64(process, stack_frame.AddrPC.Offset, &line_displacement, &line_info)) {
                 // Check if the symbol is suspicious
                 if (is_suspicious_api(symbol_name)) {
                   // Log the suspicious API call
@@ -318,9 +346,10 @@ void download_symbols() {
                 break;
               }
             }
-
+          }
+          }
             // Clean up the symbol engine
-            SymCleanup(process);
+            SymCleanup process;
             // Scan a process for suspicious indicators
             void scan_process(HANDLE process_handle,
               const wchar_t * dump_dir) {
@@ -340,7 +369,7 @@ void download_symbols() {
 
               // Dump the memory of the process
               wostringstream memory_dump_file_name_stream;
-              memory_dump_file_name_stream << dump_dir << L "" << GetProcessId(process_handle) << L ".dmp";
+              memory_dump_file_name_stream << dump_dir << L" " << GetProcessId(process_handle) << L".dmp";
               dump_memory(process_handle, memory_dump_file_name_stream.str().c_str());
 
               // Enumerate the threads of the process and stackwalk them to detect suspicious API calls
@@ -374,7 +403,7 @@ void download_symbols() {
               download_symbols();
 
               // Get the dump directory
-              const wchar_t * dump_dir = L "C:\dumps";
+              const wchar_t * dump_dir = L"C:\\dumps";
               if (argc >= 2) {
                 dump_dir = argv[1];
               }
