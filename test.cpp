@@ -15,6 +15,28 @@
 #include <vector>
 #include <mutex>
 
+#ifdef _WIN64
+#include <winnt.h>
+#else
+#include <wow64cpu.h>
+#endif
+
+#ifdef _WIN64
+// Define x64 context struct
+CONTEXT64 context = { 0 };
+context.ContextFlags = CONTEXT_ALL;
+if (GetThreadContext(thread_handle, &context)) {
+    // Use x64 context
+}
+#else
+// Define x86 context struct
+WOW64_CONTEXT context = { 0 };
+context.ContextFlags = WOW64_CONTEXT_ALL;
+if (Wow64GetThreadContext(thread_handle, &context)) {
+    // Use x86 context
+}
+#endif
+
 #pragma comment(lib, "ntdll.lib")
 #pragma comment(lib, "Dbghelp.lib")
 
