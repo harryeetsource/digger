@@ -47,40 +47,46 @@ using namespace std;
 struct MemoryRegion {
     uintptr_t base_address;
     size_t size;
+    DWORD allocation_type;
+    DWORD protection;
 };
 
 struct MemoryRegionHasher {
-    size_t operator()(const MemoryRegion& region) const {
-        return std::hash<uintptr_t>()(region.base_address) ^ std::hash<size_t>()(region.size);
+    std::size_t operator()(const MemoryRegion& region) const {
+        return std::hash<uintptr_t>{}(region.base_address) ^
+               std::hash<size_t>{}(region.size) ^
+               std::hash<DWORD>{}(region.allocation_type) ^
+               std::hash<DWORD>{}(region.protection);
     }
 };
-std::vector<MemoryRegion> get_mem_regions() {
-    std::vector<MemoryRegion> result;
-    std::unordered_set<MemoryRegion, MemoryRegionHasher> region_set;
 
+std::vector<MemoryRegion> get_mem_regions() {
     SYSTEM_INFO system_info;
     GetSystemInfo(&system_info);
 
-    // Iterate over memory regions in the process
+    uintptr_t last_address = (uintptr_t) system_info.lpMinimumApplicationAddress;
     MEMORY_BASIC_INFORMATION mem_info;
-    DWORD last_address = 0;
+    std::vector<MemoryRegion> result;
+    std::unordered_set<MemoryRegion, MemoryRegionHasher> region_set;
+
     while (VirtualQuery((LPCVOID) last_address, &mem_info, sizeof(mem_info)) == sizeof(mem_info)) {
-        if (mem_info.State == MEM_COMMIT && mem_info.Type == MEM_PRIVATE) {
+        if (mem_info.State == MEM_COMMIT && (mem_info.Protect & (PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY))) {
             MemoryRegion region;
-            region.base_address = (DWORD_PTR) mem_info.BaseAddress;
-            region.region_size = mem_info.RegionSizeInBytes;
-            region_set.insert(region);
+            region.base_address = (uintptr_t) mem_info.BaseAddress;
+            region.size = mem_info.RegionSize;
+            region.allocation_type = mem_info.Type;
+            region.protection = mem_info.Protect;
+
+            if (region_set.find(region) == region_set.end()) {
+                result.push_back(region);
+                region_set.insert(region);
+            }
         }
-        last_address = (DWORD_PTR) mem_info.BaseAddress + mem_info.RegionSizeInBytes;
-        if (last_address > (DWORD_PTR) system_info.lpMaximumApplicationAddress) {
+
+        last_address = (uintptr_t) mem_info.BaseAddress + mem_info.RegionSize;
+        if (last_address > (uintptr_t) system_info.lpMaximumApplicationAddress) {
             break;
         }
-    }
-
-    // Convert unordered_set to vector
-    result.reserve(region_set.size());
-    for (const auto& region : region_set) {
-        result.push_back(region);
     }
 
     return result;
@@ -122,7 +128,7 @@ namespace std {
   template < > struct hash < MemoryRegion > {
     size_t operator()(const MemoryRegion & region) const {
       size_t result = hash < void * > ()(region.base_address);
-      result ^= hash < size_t > ()(region.region_size) + 0x9e3779b9 + (result << 6) + (result >> 2);
+      result ^= hash < size_t > ()(region.size) + 0x9e3779b9 + (result << 6) + (result >> 2);
       result ^= hash < DWORD > ()(region.allocation_protect) + 0x9e3779b9 + (result << 6) + (result >> 2);
       result ^= hash < DWORD > ()(region.state_flags) + 0x9e3779b9 + (result << 6) + (result >> 2);
       result ^= hash < DWORD > ()(region.protect) + 0x9e3779b9 + (result << 6) + (result >> 2);
@@ -136,7 +142,7 @@ namespace std {
 MemoryRegion to_memory_region(const MEMORY_BASIC_INFORMATION & memory_info) {
   MemoryRegion region;
   region.base_address = memory_info.BaseAddress;
-  region.region_size = memory_info.RegionSize;
+  region.size = memory_info.RegionSize;
   region.allocation_protect = memory_info.Type;
   region.state_flags = memory_info.State;
   region.protect = memory_info.Protect;
