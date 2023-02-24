@@ -47,10 +47,11 @@ using namespace std;
 struct MemoryRegion {
     uintptr_t base_address;
     size_t region_size;
-    DWORD allocation_type;
-    DWORD allocation_protect;
+    DWORD memory_state;
+    DWORD memory_state_flags;
+    DWORD memory_type;
     DWORD protect;
-    DWORD state_flags;
+    DWORD allocation_protect;
 };
 
 struct MemoryRegionHasher {
