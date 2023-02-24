@@ -46,51 +46,59 @@ typedef const wchar_t* LPCWSTR;
 using namespace std;
 struct MemoryRegion {
     uintptr_t base_address;
-    size_t size;
+    size_t region_size;
     DWORD allocation_type;
-    DWORD protection;
+    DWORD allocation_protect;
+    DWORD protect;
+    DWORD state_flags;
 };
 
 struct MemoryRegionHasher {
-    std::size_t operator()(const MemoryRegion& region) const {
-        return std::hash<uintptr_t>{}(region.base_address) ^
-               std::hash<size_t>{}(region.size) ^
-               std::hash<DWORD>{}(region.allocation_type) ^
-               std::hash<DWORD>{}(region.protection);
+    size_t operator()(const MemoryRegion& region) const {
+        size_t result = hash<uintptr_t>()(region.base_address);
+        result ^= hash<size_t>()(region.region_size) + 0x9e3779b9 + (result << 6) + (result >> 2);
+        result ^= hash<DWORD>()(region.allocation_type) + 0x9e3779b9 + (result << 6) + (result >> 2);
+        result ^= hash<DWORD>()(region.allocation_protect) + 0x9e3779b9 + (result << 6) + (result >> 2);
+        result ^= hash<DWORD>()(region.protect) + 0x9e3779b9 + (result << 6) + (result >> 2);
+        result ^= hash<DWORD>()(region.state_flags) + 0x9e3779b9 + (result << 6) + (result >> 2);
+        return result;
     }
 };
+
 
 std::vector<MemoryRegion> get_mem_regions() {
     SYSTEM_INFO system_info;
     GetSystemInfo(&system_info);
 
-    uintptr_t last_address = (uintptr_t) system_info.lpMinimumApplicationAddress;
-    MEMORY_BASIC_INFORMATION mem_info;
+    uintptr_t last_address = (uintptr_t)system_info.lpMinimumApplicationAddress;
     std::vector<MemoryRegion> result;
     std::unordered_set<MemoryRegion, MemoryRegionHasher> region_set;
 
-    while (VirtualQuery((LPCVOID) last_address, &mem_info, sizeof(mem_info)) == sizeof(mem_info)) {
-        if (mem_info.State == MEM_COMMIT && (mem_info.Protect & (PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY))) {
-            MemoryRegion region;
-            region.base_address = (uintptr_t) mem_info.BaseAddress;
-            region.size = mem_info.RegionSize;
-            region.allocation_type = mem_info.Type;
-            region.protection = mem_info.Protect;
+    MEMORY_BASIC_INFORMATION mem_info;
+    while (VirtualQuery((LPCVOID)last_address, &mem_info, sizeof(mem_info)) == sizeof(mem_info)) {
+        MemoryRegion region;
+        region.base_address = (uintptr_t)mem_info.BaseAddress;
+        region.region_size = mem_info.RegionSize;
+        region.allocation_type = mem_info.AllocationType;
+        region.state = mem_info.State;
+        region.protect = mem_info.Protect;
+        region.allocation_protect = mem_info.AllocationProtect;
+        region.state_flags = mem_info.State & MEM_COMMIT ? get_state_flags(region.base_address) : 0;
 
-            if (region_set.find(region) == region_set.end()) {
-                result.push_back(region);
-                region_set.insert(region);
-            }
+        if (region_set.find(region) == region_set.end()) {
+            result.push_back(region);
+            region_set.insert(region);
         }
 
-        last_address = (uintptr_t) mem_info.BaseAddress + mem_info.RegionSize;
-        if (last_address > (uintptr_t) system_info.lpMaximumApplicationAddress) {
+        last_address = (uintptr_t)mem_info.BaseAddress + mem_info.RegionSize;
+        if (last_address > (uintptr_t)system_info.lpMaximumApplicationAddress) {
             break;
         }
     }
 
     return result;
 }
+
 
 
 // Define the list of suspicious API functions
