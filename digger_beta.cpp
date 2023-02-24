@@ -64,40 +64,49 @@ struct MemoryRegionHasher {
         return result;
     }
 };
+region.state_flags = mem_info.State & MEM_COMMIT ? get_state_flags(region.base_address) : 0;
 
 
 std::vector<MemoryRegion> get_mem_regions() {
     SYSTEM_INFO system_info;
     GetSystemInfo(&system_info);
 
-    uintptr_t last_address = (uintptr_t)system_info.lpMinimumApplicationAddress;
-    std::vector<MemoryRegion> result;
-    std::unordered_set<MemoryRegion, MemoryRegionHasher> region_set;
-
     MEMORY_BASIC_INFORMATION mem_info;
-    while (VirtualQuery((LPCVOID)last_address, &mem_info, sizeof(mem_info)) == sizeof(mem_info)) {
-        MemoryRegion region;
-        region.base_address = (uintptr_t)mem_info.BaseAddress;
-        region.region_size = mem_info.RegionSize;
-        region.allocation_type = mem_info.AllocationType;
-        region.state = mem_info.State;
-        region.protect = mem_info.Protect;
-        region.allocation_protect = mem_info.AllocationProtect;
-        region.state_flags = mem_info.State & MEM_COMMIT ? get_state_flags(region.base_address) : 0;
+    uintptr_t last_address = (uintptr_t)system_info.lpMinimumApplicationAddress;
+    std::vector<MemoryRegion> regions;
 
-        if (region_set.find(region) == region_set.end()) {
-            result.push_back(region);
-            region_set.insert(region);
+    while (last_address < (uintptr_t)system_info.lpMaximumApplicationAddress) {
+        if (VirtualQuery((LPCVOID)last_address, &mem_info, sizeof(mem_info)) == sizeof(mem_info)) {
+            MemoryRegion region;
+            region.base_address = (uintptr_t)mem_info.BaseAddress;
+            region.region_size = (size_t)mem_info.RegionSize;
+            region.allocation_type = mem_info.AllocationProtect;
+            region.state = mem_info.State;
+            region.state_flags = mem_info.State & MEM_COMMIT ? get_state_flags(region.base_address) : 0;
+            region.protect = mem_info.Protect;
+            region.type = mem_info.Type;
+            regions.push_back(region);
+            last_address = (uintptr_t)mem_info.BaseAddress + mem_info.RegionSize;
         }
-
-        last_address = (uintptr_t)mem_info.BaseAddress + mem_info.RegionSize;
-        if (last_address > (uintptr_t)system_info.lpMaximumApplicationAddress) {
-            break;
+        else {
+            last_address += 4096;
         }
     }
-
-    return result;
+    return regions;
 }
+
+MemoryRegion to_memory_region(const MEMORY_BASIC_INFORMATION& memory_info) {
+    MemoryRegion region;
+    region.base_address = (uintptr_t)memory_info.BaseAddress;
+    region.region_size = (size_t)memory_info.RegionSize;
+    region.allocation_type = memory_info.AllocationProtect;
+    region.state = memory_info.State;
+    region.state_flags = memory_info.State & MEM_COMMIT ? get_state_flags(region.base_address) : 0;
+    region.protect = memory_info.Protect;
+    region.type = memory_info.Type;
+    return region;
+}
+
 
 
 
@@ -135,7 +144,7 @@ const size_t num_suspicious_api_functions = sizeof(suspicious_api_functions) / s
 namespace std {
   template < > struct hash < MemoryRegion > {
     size_t operator()(const MemoryRegion & region) const {
-      size_t result = hash < void * > ()(region.base_address);
+      size_t result = hash < void * > ()(region.BaseAddress);
       result ^= hash < size_t > ()(region.size) + 0x9e3779b9 + (result << 6) + (result >> 2);
       result ^= hash < DWORD > ()(region.allocation_protect) + 0x9e3779b9 + (result << 6) + (result >> 2);
       result ^= hash < DWORD > ()(region.state_flags) + 0x9e3779b9 + (result << 6) + (result >> 2);
