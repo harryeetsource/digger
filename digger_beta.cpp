@@ -217,24 +217,25 @@ void dump_suspicious_process(HANDLE process_handle,
 // Download symbol files from the Microsoft symbol server
 std::wstring get_file_version(const std::wstring& module_name) {
     DWORD unused;
-    DWORD version_size = GetFileVersionInfoSize(module_name.c_str(), &unused);
+    DWORD version_size = GetFileVersionInfoSizeW(module_name.c_str(), &unused);
     if (version_size == 0) {
         return L"";
     }
 
     std::vector<char> version_info(version_size);
-    if (!GetFileVersionInfo(module_name.c_str(), 0, version_size, &version_info[0])) {
+    if (!GetFileVersionInfoW(module_name.c_str(), 0, version_size, &version_info[0])) {
         return L"";
     }
 
     VS_FIXEDFILEINFO* fixed_file_info;
     UINT fixed_file_info_size;
-    if (!VerQueryValue(&version_info[0], L"\\", reinterpret_cast<void**>(&fixed_file_info), &fixed_file_info_size)) {
+    if (!VerQueryValueW(&version_info[0], L"\\", reinterpret_cast<void**>(&fixed_file_info), &fixed_file_info_size)) {
         return L"";
     }
 
     return std::to_wstring(HIWORD(fixed_file_info->dwFileVersionMS)) + L"." + std::to_wstring(LOWORD(fixed_file_info->dwFileVersionMS)) + L"." + std::to_wstring(HIWORD(fixed_file_info->dwFileVersionLS)) + L"." + std::to_wstring(LOWORD(fixed_file_info->dwFileVersionLS));
 }
+
 
 void download_symbols() {
     for (size_t i = 0; i < num_suspicious_api_functions; ++i) {
