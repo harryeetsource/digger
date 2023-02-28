@@ -1,4 +1,5 @@
 #include <Windows.h>
+#include <tchar.h>
 #include <iostream>
 #include <vector>
 #include <string>
@@ -8,14 +9,13 @@
 #include <dbghelp.h>
 #include <TlHelp32.h>
 #include <Psapi.h>
-
 #include "sus_proc_check.h"
 #include "stackwalker.h"
 #include "Symbol_Downloader.h"
 #include "memdump.h"
 #include "injected_code_check.h"
 #include "process_enumerator.h"
-
+#include <wchar.h>
 #pragma comment(lib, "urlmon.lib")
 #pragma comment(lib, "dbghelp.lib")
 #pragma comment(lib, "Wininet.lib")
@@ -24,7 +24,6 @@
 int main() {
     // Enumerate all processes
     std::vector<DWORD> processIds = ProcessEnumerator::getProcessIds();
-    std::unordered_set<DWORD> dumpedPids;
     std::vector<std::string> apiFunctions = {
         "IsDebuggerPresent",
         "CheckRemoteDebuggerPresent",
@@ -68,13 +67,19 @@ int main() {
         "UnhookWindowsHookEx",
         "WinHttpOpen"
     };
-    for (const auto &processId : processIds) {
+    std::unordered_set<DWORD> dumpedPids;
+    for (const auto& processId : processIds) {
         try {
+            if (processId == GetCurrentProcessId() || dumpedPids.count(processId) > 0) {
+                continue; // ignore self and already dumped processes
+            }
+
             // Check for suspicious indicators
             if (checkForSuspiciousIndicators({ processId })) {
                 std::cout << "Suspicious indicators found in process " << processId << std::endl;
                 SymbolDownloader::download_symbols(apiFunctions, processId);
                 MemDumper::dump_process_memory(processId);
+                dumpedPids.insert(processId);
             }
 
             // Check for injection
@@ -82,6 +87,7 @@ int main() {
                 std::cout << "Injection found in process " << processId << std::endl;
                 SymbolDownloader::download_symbols(apiFunctions, processId);
                 MemDumper::dump_process_memory(processId);
+                dumpedPids.insert(processId);
             }
 
             // Walk the stack for suspicious processes
@@ -90,10 +96,11 @@ int main() {
                 std::cout << "Suspicious calls found in process " << processId << std::endl;
                 SymbolDownloader::download_symbols(apiFunctions, processId);
                 MemDumper::dump_process_memory(processId);
+                dumpedPids.insert(processId);
             }
         }
-        catch (const std::runtime_error &e) {
-            std::cout << "Failed to access process " << processId << ": " << e.what() << std::endl;
+                catch (const std::runtime_error& e) {
+            std::cerr << "Error processing process " << processId << ": " << e.what() << std::endl;
         }
     }
 
