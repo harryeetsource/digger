@@ -16,10 +16,9 @@
 
 class SymbolDownloader {
 public:
-    static std::wstring get_file_version(const std::wstring& module_name);
+    static std::wstring get_file_version(const std::wstring& filePath);
 
     static void download_symbols(const std::vector<std::string>& moduleNames, DWORD processId);
-
 
     static void download_symbols(const std::vector<std::string>& suspicious_api_functions);
 };
