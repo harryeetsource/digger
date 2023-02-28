@@ -5,7 +5,7 @@
 #include <wininet.h>
 #include <windows.h>
 #include <versionhelpers.h>
-
+#include <psapi.h>
 #pragma comment(lib, "wininet.lib")
 
 std::wstring SymbolDownloader::get_file_version(const std::wstring& filePath) {
@@ -33,6 +33,35 @@ std::wstring SymbolDownloader::get_file_version(const std::wstring& filePath) {
     return std::wstring(static_cast<const wchar_t*>(fileVersionPtr), fileVersionLen);
 }
 
+void SymbolDownloader::download_symbols(const std::vector<std::string>& moduleNames, DWORD processId) {
+
+    // Enumerate the modules in the process
+    HANDLE hProcess = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, processId);
+    if (hProcess == NULL) {
+        return;
+    }
+
+    std::vector<std::string> modNames;
+    HMODULE moduleHandles[1024];
+    DWORD bytesNeeded;
+    if (EnumProcessModules(hProcess, moduleHandles, sizeof(moduleHandles), &bytesNeeded)) {
+        const DWORD moduleCount = bytesNeeded / sizeof(HMODULE);
+        for (DWORD i = 0; i < moduleCount; ++i) {
+            // Get the module file name
+            char moduleFileName[MAX_PATH];
+            if (GetModuleFileNameA(moduleHandles[i], moduleFileName, MAX_PATH) != 0) {
+                modNames.push_back(moduleFileName);
+            }
+        }
+    }
+
+    // Download the symbol files for the modules
+    download_symbols(modNames);
+
+    // Close the process handle
+    CloseHandle(hProcess);
+}
+
 void SymbolDownloader::download_symbols(const std::vector<std::string>& moduleNames) {
     if (moduleNames.empty()) {
         return;
@@ -52,35 +81,34 @@ void SymbolDownloader::download_symbols(const std::vector<std::string>& moduleNa
     // Iterate over the module names and download the symbol files for each one
     for (const auto& moduleName : moduleNames) {
         // Form the URL for the symbol file
-        const std::wstring symbolUrl = L"http://msdl.microsoft.com/download/symbols/" + std::wstring(moduleName.begin(), moduleName.end()) + L"/" + get_file_version(L".\\bin\\" + std::wstring(moduleName.begin(), moduleName.end()) + L".dll");
+        const std::wstring symbolUrl = L"http://msdl.microsoft.com/download/symbols/" + std::wstring(moduleName.begin(), moduleName.end()) + L"/" + get_file_version(std::wstring(moduleName.begin(), moduleName.end()));
+            // Open a connection to the URL
+    HINTERNET hConnect = InternetConnectW(hInternet, L"msdl.microsoft.com", INTERNET_DEFAULT_HTTP_PORT, NULL, NULL, INTERNET_SERVICE_HTTP, 0, NULL);
+    if (hConnect == NULL) {
+        continue;
+    }
 
-        // Open a connection to the URL
-        HINTERNET hConnect = InternetConnectW(hInternet, L"msdl.microsoft.com", INTERNET_DEFAULT_HTTP_PORT, NULL, NULL, INTERNET_SERVICE_HTTP, 0, NULL);
-        if (hConnect == NULL) {
-            continue;
-        }
+    HINTERNET hRequest = HttpOpenRequestW(hConnect, L"GET", symbolUrl.c_str(), NULL, NULL, NULL, 0, NULL);
+    if (hRequest == NULL) {
+        InternetCloseHandle(hConnect);
+        continue;
+    }
 
-        HINTERNET hRequest = HttpOpenRequestW(hConnect, L"GET", symbolUrl.c_str(), NULL, NULL, NULL, 0, NULL);
-        if (hRequest == NULL) {
-            InternetCloseHandle(hConnect);
-            continue;
-        }
+    if (HttpSendRequestW(hRequest, NULL, 0, NULL, 0) == FALSE) {
+        InternetCloseHandle(hRequest);
+        InternetCloseHandle(hConnect);
+        continue;
+    }
 
-        if (HttpSendRequestW(hRequest, NULL, 0, NULL, 0) == FALSE) {
-            InternetCloseHandle(hRequest);
-            InternetCloseHandle(hConnect);
-            continue;
-        }
+    // Get the HTTP status code for the request
+    DWORD httpStatusCode = 0;
+    DWORD httpStatusCodeSize = sizeof(httpStatusCode);
+    HttpQueryInfoW(hRequest, HTTP_QUERY_STATUS_CODE | HTTP_QUERY_FLAG_NUMBER, &httpStatusCode, &httpStatusCodeSize, NULL);
 
-        // Get the HTTP status code for the request
-        DWORD httpStatusCode = 0;
-        DWORD httpStatusCodeSize = sizeof(httpStatusCode);
-        HttpQueryInfoW(hRequest, HTTP_QUERY_STATUS_CODE | HTTP_QUERY_FLAG_NUMBER, &httpStatusCode, &httpStatusCodeSize, NULL);
-
-        // Download the symbol file if it was found on the server
-        if (httpStatusCode == HTTP_STATUS_OK) {
-// Create the file path for the symbol file
-const std::wstring symbolFilePath = L".\\symbols\\" + std::wstring(moduleName.begin(), moduleName.end()) + L".pdb";
+    // Download the symbol file if it was found on the server
+    if (httpStatusCode == HTTP_STATUS_OK) {
+        // Create the file path for the symbol file
+        const std::wstring symbolFilePath = L".\\symbols\\" + std::wstring(moduleName.begin(), moduleName.end()) + L".pdb";
         // Open the file for writing
         std::wofstream symbolFile(symbolFilePath.c_str(), std::ios::out | std::ios_base::binary);
 
@@ -89,9 +117,7 @@ const std::wstring symbolFilePath = L".\\symbols\\" + std::wstring(moduleName.be
             std::vector<char> responseBuffer(1024);
             DWORD bytesRead;
             while (InternetReadFile(hRequest, responseBuffer.data(), responseBuffer.size(), &bytesRead) && bytesRead > 0) {
-                symbolFile.write(std::wstring(responseBuffer.begin(), responseBuffer.begin() + bytesRead).c_str(), bytesRead);
-
-
+                symbolFile.write(reinterpret_cast<const wchar_t*>(responseBuffer.data()), bytesRead);
             }
             symbolFile.close();
         }
