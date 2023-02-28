@@ -128,12 +128,13 @@ std::vector < DWORD > findProcessesWithSuspiciousIndicators() {
     }
     // Dump the process memory if it hasn't been dumped yet
     if (dumpedPids.count(processId) == 0) {
-      std::wstring dumpFilePath = L"process_" + std::to_wstring(processId) + L"_dump.bin";
-       dumpMemoryOfProcesses({ processId });
-    std::cout << "Process memory dumped for process " << processId << std::endl;
-    dumpedPids.insert(processId);
+  std::wstring dumpFilePath = L"process_" + std::to_wstring(processId) + L"_dump.bin";
+  std::set<DWORD> processIdSet(processIdsVector.begin(), processIdsVector.end());
+  dumpMemoryOfProcesses(processIdSet);
+  std::cout << "Process memory dumped for process " << processId << std::endl;
+  dumpedPids.insert(processId);
+}
 
-      }
     }
   
   return suspiciousProcesses;
