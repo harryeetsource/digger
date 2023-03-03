@@ -83,17 +83,21 @@ void dump_process_memory(HANDLE process) {
 }
 
 // Define the struct to hold information about a suspended thread
-struct SuspendedThreadInfo {
+struct Suspended_Thread_Info {
     DWORD thread_id;
     DWORD suspend_count;
 };
 
-// Define the struct to hold information about a suspended process
+// Define the class to hold information about a suspended process
+class Suspended_Process_Info {
+public:
+    std::vector<Suspended_Thread_Info> suspended_threads;
+};
+// Define the class to hold information about a suspended process
 class SuspendedProcessInfo {
 public:
-    std::vector<SuspendedThreadInfo> suspended_threads;
+    std::vector<Suspended_Thread_Info> suspended_threads;
 };
-
 // Define the maximum length of a module name
 const int MAX_MODULE_NAME_LENGTH = 255;
 
@@ -263,7 +267,7 @@ bool SuspendProcess(HANDLE process_handle, SuspendedProcessInfo &suspended_proce
             CloseHandle(thread_handle);
             continue;
         }
-        SuspendedThreadInfo suspended_thread_info;
+        Suspended_Thread_Info suspended_thread_info;
         suspended_thread_info.thread_id = *it;
         suspended_thread_info.suspend_count = suspend_count;
         suspended_process_info.suspended_threads.push_back(suspended_thread_info);
